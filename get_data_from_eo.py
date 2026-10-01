@@ -15,6 +15,10 @@ import pyproj
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
+import mlstac
+import torch
+import sen2sr
+
 def meters2latlon(center_lat, center_lon, height, width):
     lat_degree_m = 111111
     lon_degree_m = 111111 * math.cos(math.radians(center_lat))
@@ -224,4 +228,34 @@ def turn_into_image(image2):
     min_val, max_val = np.percentile(img, (2, 98))
     rgb_image = np.clip((img - min_val) / (max_val - min_val), 0, 1)
 
+    return rgb_image
+
+def download_sen2sr(output_dir = 'model/SEN2SRLite_RGBN'):
+    mlstac.download(file="https://huggingface.co/tacofoundation/sen2sr/resolve/main/SEN2SRLite/NonReference_RGBN_x4/mlm.json", output_dir=output_dir)
+    
+def to_2_5_m(image, input_dir = "model/SENSRLite_RGBN"):
+    device = "cpu"#torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    r = np.array(image.sel(band=4)).squeeze()   # B04 — Red
+    g = np.array(image.sel(band=3)).squeeze()   # B03 — Green
+    b = np.array(image.sel(band=2)).squeeze()   # B02 — Blue
+    b8 = np.array(image.sel(band=8)).squeeze()   # B02 — Blue
+    img = torch.from_numpy(np.stack([r, g, b, b8], axis=0).astype(np.float32))
+
+    dummy_s2_data = torch.nn.functional.pad(img, (0, (1 << (img.shape[-1] - 1).bit_length()) - img.shape[-1], 0, (1 << (img.shape[-2] - 1).bit_length()) - img.shape[-2]), mode='constant')
+    
+    print(dummy_s2_data.shape)
+    # 3. Convert to PyTorch Tensor
+    X = dummy_s2_data.float().to(device)
+
+    # 4. Load the model via the reader and run inference
+    model = mlstac.load("model/SEN2SRLite_RGBN").compiled_model(device=device)
+    with torch.no_grad():
+        super_resolved_tensor = sen2sr.predict_large(model=model, X=X, overlap=32)
+        #super_resolved_tensor = model(X[None]).squeeze(0) # Returns shape (4, 512, 512)
+        
+    img = super_resolved_tensor[:3, :img.shape[1] * 4, :img.shape[2] * 4].permute(1, 2, 0).numpy()
+    min_val, max_val = np.percentile(img, (2, 98))
+    rgb_image = np.clip((img - min_val) / (max_val - min_val), 0, 1)
+    
     return rgb_image
